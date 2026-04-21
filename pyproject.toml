@@ -8,21 +8,15 @@ dependencies = [
     "docker>=7.1.0",
     "fastapi>=0.115.12",
     "fastmcp>=2.2.0",
-    "passlib[bcrypt]>=1.7.4",
-    "pydantic[email]>=2.11.3",
-    "python-jose[cryptography]>=3.4.0",
-    "python-multipart>=0.0.20",
-    "ruff>=0.11.6",
+    "pydantic>=2.11.3",
     "tomli>=2.2.1",
+    "uvicorn>=0.34.0",
 ]
 
 [project.scripts]
 mcp-sandbox = "main:main"
 
-[tool.uv]
-index-url = "https://mirrors.aliyun.com/pypi/simple/"
-extra-index-url = [
-    "https://pypi.mirrors.ustc.edu.cn/simple/",
-    "https://pypi.doubanio.com/simple/",
-    "https://pypi.org/simple"
+[dependency-groups]
+dev = [
+    "ruff>=0.11.6",
 ]
