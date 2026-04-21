@@ -12,10 +12,8 @@ DEFAULT_CONFIG = {
         "host": "127.0.0.1",
         "port": 8181,
     },
-    "auth": {
-        "require_auth": False,
-        "default_user_id": "root",
-        "user_sandbox_limit": 3,
+    "sandbox": {
+        "global_sandbox_limit": 50,
     },
     "docker": {
         "default_image": "python-sandbox:latest",
@@ -50,15 +48,12 @@ SANDBOX_IDLE_TIMEOUT_SECONDS = int(
     config.get("docker", {}).get("sandbox_idle_timeout_seconds", 1800)
 )
 
-# Auth configuration
-REQUIRE_AUTH = config.get("auth", {}).get("require_auth", False)
-DEFAULT_USER_ID = config.get("auth", {}).get("default_user_id", "root")
-USER_SANDBOX_LIMIT = config.get("auth", {}).get("user_sandbox_limit", 3)
+# Global cap on sandboxes.
+GLOBAL_SANDBOX_LIMIT = int(
+    config.get("sandbox", {}).get("global_sandbox_limit", 50)
+)
 
 PYPI_INDEX_URL = config["mirror"]["pypi_index_url"]
-
-# Base URL for file access
-BASE_URL = f"http://{HOST}:{PORT}/static/"
 
 # Configure logging for MCP_SANDBOX
 logger = logging.getLogger("MCP_SANDBOX")

@@ -3,12 +3,9 @@
 host = "0.0.0.0"
 port = 8181
 
-[auth]
-require_auth = false
-# Default user ID when authentication is disabled
-default_user_id = "root"
-# Maximum number of sandboxes a user can create
-user_sandbox_limit = 3
+[sandbox]
+# Global cap on simultaneously existing sandboxes (per-process)
+global_sandbox_limit = 50
 
 [docker]
 # Default Docker image name
