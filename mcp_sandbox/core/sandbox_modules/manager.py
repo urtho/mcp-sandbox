@@ -1,7 +1,9 @@
 import uuid
 import json
+import secrets
+import threading
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from pathlib import Path
 import hashlib
 from contextlib import contextmanager
@@ -9,7 +11,16 @@ from mcp_sandbox.utils.config import (
     logger,
     DEFAULT_DOCKER_IMAGE,
     GLOBAL_SANDBOX_LIMIT,
+    PER_SESSION_SANDBOX_LIMIT,
     SANDBOX_IDLE_TIMEOUT_SECONDS,
+    SANDBOX_NETWORK,
+    TMP_DIR_SIZE,
+    RESULTS_DIR_SIZE,
+    PIDS_LIMIT,
+    NOFILE_SOFT,
+    NOFILE_HARD,
+    SANDBOX_UID,
+    SANDBOX_GID,
     config,
 )
 from mcp_sandbox.utils.task_manager import PeriodicTaskManager
@@ -18,6 +29,9 @@ import docker
 
 SANDBOX_LABEL_KEY = "python-sandbox"
 SANDBOX_LABEL_FILTER = {"label": SANDBOX_LABEL_KEY}
+LABEL_RESUME_TOKEN = "mcp-sandbox.resume-token"
+LABEL_DOWNLOAD_TOKEN = "mcp-sandbox.download-token"
+LABEL_OWNER_SESSION = "mcp-sandbox.owner-session"
 
 
 class SandboxManager:
@@ -28,6 +42,10 @@ class SandboxManager:
         self.sandbox_last_used: Dict[str, datetime] = {}
         self.session_sandbox_map: Dict[str, str] = {}
         self.package_install_status: Dict[str, Dict[str, Any]] = {}
+        # Per-sandbox locks serialize concurrent tool calls on the same sandbox
+        # so the shared /tmp/code_to_run.py path is never clobbered.
+        self._sandbox_locks: Dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
         try:
             self.sandbox_client = docker.from_env()
             logger.info("Sandbox client initialized successfully")
@@ -37,7 +55,22 @@ class SandboxManager:
         self._ensure_sandbox_image()
         self._load_sandbox_records()
         self._start_idle_enforcer()
-        logger.info(f"SandboxManager initialized, using base image: {self.base_image}")
+        logger.info(
+            "SandboxManager initialized "
+            f"(image={self.base_image}, network={SANDBOX_NETWORK}, "
+            f"global_limit={GLOBAL_SANDBOX_LIMIT}, session_limit={PER_SESSION_SANDBOX_LIMIT})"
+        )
+
+    @contextmanager
+    def sandbox_lock(self, sandbox_id: str):
+        """Acquire an exclusive lock on a single sandbox for the duration of a tool call."""
+        with self._locks_guard:
+            lock = self._sandbox_locks.setdefault(sandbox_id, threading.Lock())
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _start_idle_enforcer(self) -> None:
         """Start background task that removes sandboxes idle beyond the timeout"""
@@ -93,6 +126,8 @@ class SandboxManager:
         for session_id, sb_id in list(self.session_sandbox_map.items()):
             if sb_id == sandbox_id:
                 del self.session_sandbox_map[session_id]
+        with self._locks_guard:
+            self._sandbox_locks.pop(sandbox_id, None)
 
     def _ensure_sandbox_image(self):
         """Ensure our custom Sandbox image exists, build it if needed"""
@@ -196,37 +231,94 @@ class SandboxManager:
             logger.error(f"Failed to count sandboxes: {e}")
             return 0
 
-    def create_sandbox(self) -> str:
-        """Create a new sandbox container and return its Docker container ID"""
+    def _count_session_sandboxes(self, session_id: str) -> int:
+        """Sandboxes created by this MCP session (still alive)"""
+        try:
+            containers = self.sandbox_client.containers.list(
+                all=True,
+                filters={"label": f"{LABEL_OWNER_SESSION}={session_id}"},
+            )
+            return len(containers)
+        except Exception as e:
+            logger.error(f"Failed to count session sandboxes: {e}")
+            return 0
+
+    def _label(self, container, key: str) -> Optional[str]:
+        try:
+            return container.labels.get(key)
+        except Exception:
+            return None
+
+    def get_resume_token(self, container) -> Optional[str]:
+        return self._label(container, LABEL_RESUME_TOKEN)
+
+    def get_download_token(self, container) -> Optional[str]:
+        return self._label(container, LABEL_DOWNLOAD_TOKEN)
+
+    def create_sandbox(self, owner_session_id: str = "") -> Tuple[str, str, str]:
+        """Create a hardened sandbox container.
+
+        Returns (sandbox_id, resume_token, download_token).
+        """
         sandbox_name = f"python-sandbox-{str(uuid.uuid4())[:8]}"
+        resume_token = secrets.token_urlsafe(32)
+        download_token = secrets.token_urlsafe(24)
+        # tmpfs needs uid/gid to be writable by the image's non-root user
+        # (jovyan @ 1000:100 in jupyter/scipy-notebook). /tmp keeps the default
+        # 1777 sticky-bit mode so `pip`/`uv` build dirs work for any UID.
+        results_opts = (
+            f"rw,size={RESULTS_DIR_SIZE},nosuid,nodev,noexec,"
+            f"uid={SANDBOX_UID},gid={SANDBOX_GID},mode=755"
+        )
+        tmpfs_opts = {
+            "/tmp": f"rw,size={TMP_DIR_SIZE},nosuid,nodev",
+            "/app/results": results_opts,
+        }
+        labels = {
+            SANDBOX_LABEL_KEY: "true",
+            LABEL_RESUME_TOKEN: resume_token,
+            LABEL_DOWNLOAD_TOKEN: download_token,
+        }
+        if owner_session_id:
+            labels[LABEL_OWNER_SESSION] = owner_session_id
+        ulimits = [
+            docker.types.Ulimit(name="nofile", soft=NOFILE_SOFT, hard=NOFILE_HARD),
+        ]
         try:
             sandbox = self.sandbox_client.containers.create(
                 image=self.base_image,
                 name=sandbox_name,
                 detach=True,
                 working_dir="/app/results",
-                labels={SANDBOX_LABEL_KEY: "true"},
+                labels=labels,
                 mem_limit="1g",
                 memswap_limit="1g",
                 nano_cpus=1_000_000_000,
-                network_mode="bridge",
+                pids_limit=PIDS_LIMIT,
+                ulimits=ulimits,
+                tmpfs=tmpfs_opts,
+                network_mode=SANDBOX_NETWORK,
                 privileged=False,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges"],
             )
             sandbox.start()
-            logger.info(f"Created new sandbox: {sandbox.id} (name: {sandbox_name})")
+            logger.info(
+                f"Created sandbox {sandbox.id} (name={sandbox_name}, "
+                f"network={SANDBOX_NETWORK}, session={owner_session_id or '-'})"
+            )
             self.sandbox_last_used[sandbox.id] = datetime.now()
-            return sandbox.id
+            return sandbox.id, resume_token, download_token
         except Exception as e:
             logger.error(f"Failed to create sandbox: {e}", exc_info=True)
             raise
 
-    def create_user_sandbox(self) -> dict:
-        """Create a new sandbox, subject to the global cap.
+    def create_user_sandbox(self, session_id: str = "") -> dict:
+        """Create a new sandbox, subject to the global and per-session caps.
 
-        The returned `sandbox_id` is the Docker container ID — a stable hex
-        identifier clients can pass back later to resume the same sandbox.
+        Returns a dict containing `sandbox_id`, `resume_token`, and
+        `download_token`. The caller MUST show the tokens to the model and
+        NEVER echo them in untrusted contexts.
         """
         total = self._count_sandboxes()
         if total >= GLOBAL_SANDBOX_LIMIT:
@@ -240,9 +332,26 @@ class SandboxManager:
                     "Delete an existing sandbox before creating a new one."
                 ),
             }
+        if session_id and PER_SESSION_SANDBOX_LIMIT > 0:
+            mine = self._count_session_sandboxes(session_id)
+            if mine >= PER_SESSION_SANDBOX_LIMIT:
+                return {
+                    "error": True,
+                    "message": (
+                        f"Per-session limit of {PER_SESSION_SANDBOX_LIMIT} "
+                        "sandboxes reached for this MCP session."
+                    ),
+                }
         try:
-            sandbox_id = self.create_sandbox()
-            return {"sandbox_id": sandbox_id, "status": "active"}
+            sandbox_id, resume_token, download_token = self.create_sandbox(
+                owner_session_id=session_id
+            )
+            return {
+                "sandbox_id": sandbox_id,
+                "resume_token": resume_token,
+                "download_token": download_token,
+                "status": "active",
+            }
         except Exception as e:
             logger.error(f"Error creating sandbox: {e}", exc_info=True)
             return {"error": True, "message": str(e)}
@@ -250,38 +359,59 @@ class SandboxManager:
     def get_or_create_session_sandbox(self, session_id: str) -> dict:
         """Return the sandbox bound to this MCP session, creating one on first use.
 
-        The returned `sandbox_id` is stable across MCP reconnects: pass it back
-        as `sandbox_id` to any tool in a later session to resume.
+        On first use, the response contains `resume_token` and `download_token`;
+        callers MUST surface these to the model and NEVER echo them elsewhere.
         """
         bound = self.session_sandbox_map.get(session_id)
         if bound:
             try:
-                self.sandbox_client.containers.get(bound)
-                return {"sandbox_id": bound, "status": "active", "resumed": True}
+                container = self.sandbox_client.containers.get(bound)
+                return {
+                    "sandbox_id": bound,
+                    "status": "active",
+                    "resumed": True,
+                    # tokens omitted on refetch — caller already has them
+                }
             except docker.errors.NotFound:
                 logger.info(
                     f"Session {session_id} was bound to sandbox {bound} but container is gone; recreating"
                 )
                 self._forget_sandbox(bound)
 
-        created = self.create_user_sandbox()
+        created = self.create_user_sandbox(session_id=session_id)
         if created.get("error"):
             return created
         self.session_sandbox_map[session_id] = created["sandbox_id"]
         created["resumed"] = False
         return created
 
-    def bind_session_to_sandbox(self, session_id: str, sandbox_id: str) -> bool:
-        """Remember that this session is using an explicitly-passed sandbox"""
+    def bind_session_to_sandbox(
+        self, session_id: str, sandbox_id: str, resume_token: str
+    ) -> dict:
+        """Adopt an explicitly-passed sandbox into this session.
+
+        Requires a valid `resume_token` to defeat sandbox hijacking by anyone
+        who merely learned the sandbox_id.
+        """
         try:
-            self.sandbox_client.containers.get(sandbox_id)
+            container = self.sandbox_client.containers.get(sandbox_id)
         except docker.errors.NotFound:
-            return False
+            return {"error": True, "message": f"Sandbox not found: {sandbox_id}"}
         except Exception as e:
             logger.error(f"bind_session_to_sandbox: Docker error: {e}")
-            return False
-        self.session_sandbox_map[session_id] = sandbox_id
-        return True
+            return {"error": True, "message": str(e)}
+
+        expected = self.get_resume_token(container)
+        if not expected or not resume_token or not secrets.compare_digest(
+            expected, resume_token
+        ):
+            logger.warning(
+                f"bind_session_to_sandbox: token mismatch for {sandbox_id}"
+            )
+            return {"error": True, "message": "Invalid resume_token"}
+
+        self.session_sandbox_map[session_id] = container.id
+        return {"sandbox_id": container.id, "status": "active", "resumed": True}
 
     def get_container_by_sandbox_id(self, sandbox_id: str):
         """Return (container, None) or (None, error) for a sandbox ID.

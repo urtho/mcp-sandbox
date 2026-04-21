@@ -1,7 +1,7 @@
 from typing import Dict, Any
 import threading
 from datetime import datetime
-from mcp_sandbox.utils.config import PYPI_INDEX_URL
+from mcp_sandbox.utils.config import PYPI_INDEX_URL, INSTALL_TIMEOUT_SECONDS
 
 
 class SandboxPackageMixin:
@@ -15,9 +15,19 @@ class SandboxPackageMixin:
             with self._get_running_sandbox(sandbox_id) as sandbox:
                 pip_index_url = PYPI_INDEX_URL
                 pip_index_opt = f" --index-url {pip_index_url}" if pip_index_url else ""
-                print(f"Installing {package_name} with pip index URL: {pip_index_url}")
+                logger.info(
+                    f"Installing {package_name} (index={pip_index_url or 'PyPI default'}, "
+                    f"timeout={INSTALL_TIMEOUT_SECONDS}s)"
+                )
                 exec_result = sandbox.exec_run(
-                    cmd=f"uv pip install{pip_index_opt} {package_name}",
+                    cmd=[
+                        "timeout",
+                        "--signal=KILL",
+                        str(INSTALL_TIMEOUT_SECONDS),
+                        "sh",
+                        "-c",
+                        f"uv pip install{pip_index_opt} {package_name}",
+                    ],
                     stdout=True,
                     stderr=True,
                     privileged=False,

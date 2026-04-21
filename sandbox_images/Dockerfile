@@ -1,36 +1,23 @@
-FROM python:3.12-slim
+FROM quay.io/jupyter/scipy-notebook:latest
 
-WORKDIR /app
+# scipy-notebook ships numpy, pandas, matplotlib, scipy, scikit-learn, seaborn,
+# sympy, statsmodels, bokeh, dask, numba, scikit-image, sqlalchemy, etc.
+# See https://jupyter-docker-stacks.readthedocs.io/
 
-# Install basic tools and matplotlib system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    libfreetype6-dev \
-    libpng-dev \
-    pkg-config \
+USER root
+RUN mkdir -p /app/results \
+    && chown -R ${NB_UID}:${NB_GID} /app \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends coreutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN pip install uv
+USER ${NB_UID}
 
-# Create non-root user
-RUN groupadd -r python && useradd -r -g python -d /home/python -m python
+# uv is the package manager the MCP tools use at runtime.
+RUN pip install --no-cache-dir uv
 
-# Provide directory for additional packages installation
-RUN mkdir -p /app/results && chown -R python:python /app
-
-# Set secure execution user
-USER python
-
-# Create and activate uv venv
-RUN uv venv && \
-    echo 'source .venv/bin/activate' >> /home/python/.bashrc
-
-ENV PATH="/app/.venv/bin:$PATH"
-ENV VIRTUAL_ENV="/app/.venv"
-
-# Set working directory to results directory
+# tmpfs is remounted over /app/results at container create time; keeping this
+# as the default workdir is still the simplest convention for our tool code.
 WORKDIR /app/results
 
-# Container entry point - use sleep infinity to keep container running
 CMD ["sleep", "infinity"]

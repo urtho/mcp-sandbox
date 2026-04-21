@@ -1,29 +1,49 @@
 [server]
-# Server configuration
 host = "0.0.0.0"
 port = 8181
 
 [sandbox]
-# Global cap on simultaneously existing sandboxes (per-process)
+# Hard cap across the whole process.
 global_sandbox_limit = 50
+# Per-MCP-session cap (resets on reconnect since session_id rotates).
+per_session_sandbox_limit = 3
+# Network attached to each sandbox container:
+#   "none"        — no network (safest; breaks pip install)
+#   "sandbox-net" — user-defined network with a pip proxy (see docker-compose.yaml)
+#   "bridge"      — full outbound internet (dev only)
+# Overridable with MCP_SANDBOX_NETWORK.
+sandbox_network = "none"
+# Per-exec deadline for code/shell/install commands (seconds). `timeout(1)` in
+# the container SIGKILLs processes that overrun.
+execution_timeout_seconds = 60
+install_timeout_seconds = 180
+# Size caps for writable paths inside the sandbox.
+tmp_dir_size = "256m"
+results_dir_size = "1g"
+# Owner of the tmpfs mounts; must match the non-root user inside the image.
+# jupyter/scipy-notebook's jovyan is uid=1000, gid=100.
+sandbox_uid = 1000
+sandbox_gid = 100
+# Max concurrent processes inside a sandbox (fork-bomb guard).
+pids_limit = 256
+# Max open files inside a sandbox.
+nofile_soft_limit = 1024
+nofile_hard_limit = 2048
 
 [docker]
-# Default Docker image name
 default_image = "python-sandbox:latest"
-# Dockerfile path
 dockerfile_path = "sandbox_images/Dockerfile"
-# Whether to check for Dockerfile changes and rebuild if needed
 check_dockerfile_changes = true
-# File to store last build information
 build_info_file = ".docker_build_info"
-# Idle timeout for a sandbox container in seconds (containers untouched for this long are removed)
+# Idle timeout: containers untouched this long are removed.
 sandbox_idle_timeout_seconds = 1800
 
 [logging]
-# Logging configuration
 level = "INFO"
 format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 log_file = "mcp_sandbox.log"
 
 [mirror]
-pypi_index_url = "https://mirrors.aliyun.com/pypi/simple/"
+# Default empty -> pip uses PyPI. Set this (or MCP_SANDBOX_PIP_INDEX_URL) to a
+# proxy on the sandbox network, e.g. "http://pypi-proxy:5000/index/".
+pypi_index_url = ""

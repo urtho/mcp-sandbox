@@ -1,0 +1,66 @@
+# Example deployment with an isolated sandbox network and a caching PyPI proxy.
+#
+# Network layout
+# ──────────────
+#   mcp-control       : mcp-sandbox <-> clients (exposes :8181).
+#   sandbox-net       : internal=true, NO internet. Every sandbox container is
+#                       attached to this network. Sandboxes reach pypi-proxy
+#                       by its DNS alias only.
+#   pypi-upstream     : pypi-proxy <-> real internet, for upstream PyPI.
+#
+# The mcp-sandbox service creates sandbox containers via the host Docker socket
+# and attaches them to `sandbox-net` (controlled by MCP_SANDBOX_NETWORK).
+# Packages installed inside sandboxes are fetched through http://pypi-proxy:5000/index/.
+#
+# Caveat: containers attached to the same user-defined bridge can reach each
+# other. If that matters in your threat model, run one mcp-sandbox instance per
+# tenant on per-tenant networks, or use Docker's userland-proxy + per-container
+# network namespaces.
+
+services:
+  mcp-sandbox:
+    build: .
+    image: mcp-sandbox:latest
+    container_name: mcp-sandbox
+    restart: unless-stopped
+    ports:
+      - "8181:8181"
+    environment:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8181"
+      # Every sandbox container created by this process is attached to
+      # sandbox-net instead of the Docker default bridge.
+      MCP_SANDBOX_NETWORK: "sandbox-net"
+      # pip/uv index inside the sandbox. Reachable only over sandbox-net.
+      MCP_SANDBOX_PIP_INDEX_URL: "http://pypi-proxy:5000/index/"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - mcp-control
+    depends_on:
+      - pypi-proxy
+
+  # Caching proxy that re-exports PyPI over plain HTTP. Sandboxes reach it over
+  # sandbox-net; the proxy itself reaches pypi.org over pypi-upstream.
+  # Swap for devpi/pypiserver/nginx-cache if you prefer.
+  pypi-proxy:
+    image: epicwink/proxpi:latest
+    container_name: pypi-proxy
+    restart: unless-stopped
+    networks:
+      sandbox-net:
+        aliases: [pypi-proxy]
+      pypi-upstream: {}
+    # Deliberately NOT published — reachable only via internal networks.
+
+networks:
+  mcp-control:
+    name: mcp-control
+    driver: bridge
+  sandbox-net:
+    name: sandbox-net
+    driver: bridge
+    internal: true    # no egress; only the aliases on this network are reachable
+  pypi-upstream:
+    name: pypi-upstream
+    driver: bridge

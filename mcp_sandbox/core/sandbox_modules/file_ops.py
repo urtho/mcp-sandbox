@@ -48,9 +48,21 @@ class SandboxFileOpsMixin:
 
     def get_file_link(self, sandbox_id: str, file_path: str) -> str:
         from mcp_sandbox.utils.config import HOST, PORT
+        from urllib.parse import quote
 
+        token = ""
+        try:
+            container, err = self.get_container_by_sandbox_id(sandbox_id)
+            if container and not err:
+                token = self.get_download_token(container) or ""
+        except Exception:
+            pass
         base_url = f"http://{HOST}:{PORT}"
-        return f"{base_url}/sandbox/file?sandbox_id={sandbox_id}&file_path={file_path}"
+        return (
+            f"{base_url}/sandbox/file?sandbox_id={sandbox_id}"
+            f"&file_path={quote(file_path, safe='/')}"
+            f"&token={token}"
+        )
 
     def upload_file_to_sandbox(
         self, sandbox_id: str, local_file_path: str, dest_path: str = "/app/results"

@@ -1,23 +1,37 @@
 from typing import Dict, Any
 import time
+import uuid
+from mcp_sandbox.utils.config import EXECUTION_TIMEOUT_SECONDS
+
+
+def _timeout_cmd(seconds: int, cmd: list) -> list:
+    """Prepend `timeout --signal=KILL` to a command list."""
+    return ["timeout", "--signal=KILL", str(seconds), *cmd]
+
+
+def _annotate_timeout(exit_code: int, stderr: str) -> str:
+    if exit_code == 124:
+        return (stderr + "\n" if stderr else "") + (
+            f"[timeout: killed after {EXECUTION_TIMEOUT_SECONDS}s]"
+        )
+    if exit_code == 137:
+        return (stderr + "\n" if stderr else "") + "[killed by runtime limit]"
+    return stderr
 
 
 class SandboxExecutionMixin:
     def execute_python_code(self, sandbox_id: str, code: str) -> Dict[str, Any]:
-        # Verify sandbox exists (now using sandbox_id instead of docker container ID)
         error = self.verify_sandbox_exists(sandbox_id)
         if error:
             return error
         start_ts = int(time.time())
         logger = self._get_logger()
-        logger.info("Executing code:")
-        logger.info("=" * 50)
-        logger.info(code)
-        logger.info("=" * 50)
-        logger.info(f"Running code in sandbox {sandbox_id}")
+        logger.info(f"Running code in sandbox {sandbox_id} (len={len(code)})")
         try:
             with self._get_running_sandbox(sandbox_id) as sandbox:
-                temp_code_file = "/tmp/code_to_run.py"
+                # Unique per-call path avoids clobbering if two callers end up
+                # on the same sandbox despite the sandbox_lock.
+                temp_code_file = f"/tmp/code_{uuid.uuid4().hex}.py"
                 write_code_cmd = f"cat > {temp_code_file} << 'EOL'\n{code}\nEOL"
                 write_result = sandbox.exec_run(
                     cmd=["sh", "-c", write_code_cmd],
@@ -37,7 +51,9 @@ class SandboxExecutionMixin:
                         "file_links": [],
                     }
                 exec_result = sandbox.exec_run(
-                    cmd=["python", temp_code_file],
+                    cmd=_timeout_cmd(
+                        EXECUTION_TIMEOUT_SECONDS, ["python", temp_code_file]
+                    ),
                     workdir="/app/results",
                     stdout=True,
                     stderr=True,
@@ -48,6 +64,7 @@ class SandboxExecutionMixin:
                 stdout_bytes, stderr_bytes = exec_result.output
                 stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
                 stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
+                stderr = _annotate_timeout(exit_code, stderr)
                 sandbox.exec_run(cmd=["rm", "-f", temp_code_file], privileged=False)
                 all_files = self.list_files_in_sandbox(sandbox_id, with_stat=True)
                 new_files = [f for f, ctime in all_files if ctime >= start_ts]
@@ -122,7 +139,9 @@ class SandboxExecutionMixin:
             with self._get_running_sandbox(sandbox_id) as container:
                 logger.info(f"Executing command in sandbox {sandbox_id}: {command}")
                 exec_result = container.exec_run(
-                    command,
+                    _timeout_cmd(
+                        EXECUTION_TIMEOUT_SECONDS, ["sh", "-c", command]
+                    ),
                     stdout=True,
                     stderr=True,
                     stdin=False,
@@ -134,6 +153,7 @@ class SandboxExecutionMixin:
 
                 stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
                 stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+                stderr = _annotate_timeout(exit_code, stderr)
 
                 return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
         except Exception as e:
