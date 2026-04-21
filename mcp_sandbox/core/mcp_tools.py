@@ -16,6 +16,22 @@ RESUME_HINT = (
     "the `resume_token`: anyone who has it can take over the sandbox."
 )
 
+ENVIRONMENT_HINT = (
+    "SANDBOX ENVIRONMENT: each sandbox is a container based on "
+    "jupyter/scipy-notebook (Debian + Python 3.12). The following packages are "
+    "pre-installed and importable directly, no install needed: numpy, pandas, "
+    "scipy, matplotlib, seaborn, bokeh, altair, scikit-learn, scikit-image, "
+    "statsmodels, sympy, numba, numexpr, dask, h5py, pytables, sqlalchemy, "
+    "openpyxl, xlrd, beautifulsoup4, cython, cloudpickle, dill, protobuf. "
+    "Write outputs (plots, CSVs, text) under /app/results — that path is a "
+    "tmpfs volume capped at 1GB and served back via `file_links` in results. "
+    "/tmp is a 256MB tmpfs, also writable. Each code or shell call is killed "
+    "after 60s. `pip`/`uv pip install` work only if the deployment attaches a "
+    "PyPI proxy to the sandbox network (see the README); by default the "
+    "sandbox has NO network, so rely on the pre-installed stack. `requests` "
+    "and other network clients will fail unless a proxy is configured."
+)
+
 
 class SandboxEnvironment(
     SandboxManager,
@@ -85,7 +101,9 @@ class SandboxToolsPlugin:
                 "Executes Python code in a sandbox and returns stdout, stderr, "
                 "exit_code, files, and file_links. Parameters: code (string, "
                 "required); sandbox_id (string, optional); resume_token "
-                "(string, optional — REQUIRED when sandbox_id is provided). "
+                "(string, optional — REQUIRED when sandbox_id is provided).\n\n"
+                + ENVIRONMENT_HINT
+                + "\n\n"
                 + RESUME_HINT
             ),
         )
@@ -137,10 +155,14 @@ class SandboxToolsPlugin:
         @self.mcp.tool(
             name="install_package_in_sandbox",
             description=(
-                "Installs a Python package in a sandbox via pip. Parameters: "
-                "package_name (string, required); sandbox_id (string, optional); "
-                "resume_token (string, optional — REQUIRED with sandbox_id). "
-                + RESUME_HINT
+                "Installs an additional Python package via pip/uv. Only needed "
+                "for packages NOT already in the scipy-notebook stack (see "
+                "execute_python_code description). Requires the deployment to "
+                "expose a PyPI proxy to the sandbox network; otherwise this "
+                "call will fail because sandboxes have no internet by default. "
+                "Parameters: package_name (string, required); sandbox_id "
+                "(string, optional); resume_token (string, optional — REQUIRED "
+                "with sandbox_id). " + RESUME_HINT
             ),
         )
         def install_package_in_sandbox(
