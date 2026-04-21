@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
         "dockerfile_path": "sandbox_images/Dockerfile",
         "check_dockerfile_changes": True,
         "build_info_file": ".docker_build_info",
+        "sandbox_idle_timeout_seconds": 1800,
     },
     "logging": {
         "level": "INFO",
@@ -45,6 +46,9 @@ except (FileNotFoundError, tomli.TOMLDecodeError) as e:
 HOST = os.environ.get("APP_HOST", config["server"]["host"])
 PORT = int(os.environ.get("APP_PORT", config["server"]["port"]))
 DEFAULT_DOCKER_IMAGE = config["docker"]["default_image"]
+SANDBOX_IDLE_TIMEOUT_SECONDS = int(
+    config.get("docker", {}).get("sandbox_idle_timeout_seconds", 1800)
+)
 
 # Auth configuration
 REQUIRE_AUTH = config.get("auth", {}).get("require_auth", False)

@@ -19,6 +19,8 @@ dockerfile_path = "sandbox_images/Dockerfile"
 check_dockerfile_changes = true
 # File to store last build information
 build_info_file = ".docker_build_info"
+# Idle timeout for a sandbox container in seconds (containers untouched for this long are removed)
+sandbox_idle_timeout_seconds = 1800
 
 [logging]
 # Logging configuration

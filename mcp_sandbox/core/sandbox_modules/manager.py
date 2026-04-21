@@ -5,7 +5,13 @@ from typing import Dict, Optional, Any
 from pathlib import Path
 import hashlib
 from contextlib import contextmanager
-from mcp_sandbox.utils.config import logger, DEFAULT_DOCKER_IMAGE, config
+from mcp_sandbox.utils.config import (
+    logger,
+    DEFAULT_DOCKER_IMAGE,
+    SANDBOX_IDLE_TIMEOUT_SECONDS,
+    config,
+)
+from mcp_sandbox.utils.task_manager import PeriodicTaskManager
 from mcp_sandbox.db.database import db
 import docker
 
@@ -26,7 +32,65 @@ class SandboxManager:
             raise
         self._ensure_sandbox_image()
         self._load_sandbox_records()
+        self._start_idle_enforcer()
         logger.info(f"SandboxManager initialized, using base image: {self.base_image}")
+
+    def _start_idle_enforcer(self) -> None:
+        """Start background task that removes sandboxes idle beyond the timeout"""
+        if SANDBOX_IDLE_TIMEOUT_SECONDS <= 0:
+            logger.info("Sandbox idle enforcement disabled (timeout <= 0)")
+            return
+        interval = max(30, min(300, SANDBOX_IDLE_TIMEOUT_SECONDS // 6 or 60))
+        PeriodicTaskManager.start_task(
+            self.cleanup_idle_sandboxes,
+            interval,
+            f"sandbox idle enforcer (timeout={SANDBOX_IDLE_TIMEOUT_SECONDS}s)",
+        )
+
+    def cleanup_idle_sandboxes(self) -> None:
+        """Remove sandbox containers that have been idle longer than the timeout"""
+        try:
+            containers = self.sandbox_client.containers.list(
+                all=True, filters={"label": "python-sandbox"}
+            )
+        except Exception as e:
+            logger.error(f"Idle enforcer: failed to list containers: {e}")
+            return
+
+        now = datetime.now()
+        for container in containers:
+            last_used = self.sandbox_last_used.get(container.id)
+            if last_used is None:
+                # Untracked container — adopt it so it gets a grace period before removal.
+                self.sandbox_last_used[container.id] = now
+                continue
+            idle_seconds = (now - last_used).total_seconds()
+            if idle_seconds < SANDBOX_IDLE_TIMEOUT_SECONDS:
+                continue
+            logger.info(
+                f"Idle enforcer: removing sandbox {container.id} "
+                f"(idle {idle_seconds:.0f}s >= {SANDBOX_IDLE_TIMEOUT_SECONDS}s)"
+            )
+            try:
+                if container.status == "running":
+                    container.stop(timeout=0)
+                container.remove(force=True)
+            except Exception as e:
+                logger.error(
+                    f"Idle enforcer: failed to remove {container.id}: {e}",
+                    exc_info=True,
+                )
+                continue
+            self.sandbox_last_used.pop(container.id, None)
+            for session_id, sb_id in list(self.session_sandbox_map.items()):
+                if sb_id == container.id:
+                    del self.session_sandbox_map[session_id]
+            try:
+                db.delete_sandbox_by_container_id(container.id)
+            except Exception as e:
+                logger.error(
+                    f"Idle enforcer: failed to delete DB row for {container.id}: {e}"
+                )
 
     def _ensure_sandbox_image(self):
         """Ensure our custom Sandbox image exists, build it if needed"""
@@ -131,6 +195,7 @@ class SandboxManager:
                 labels={"python-sandbox": "true"},
                 mem_limit="1g",
                 memswap_limit="1g",
+                nano_cpus=1_000_000_000,
                 network_mode="bridge",
                 privileged=False,
                 cap_drop=["ALL"],

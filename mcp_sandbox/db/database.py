@@ -200,6 +200,20 @@ class Database:
             print(f"Error deleting sandbox: {e}")
             return False
 
+    def delete_sandbox_by_container_id(self, docker_container_id: str) -> bool:
+        """Delete a sandbox row by its Docker container ID"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                "DELETE FROM sandboxes WHERE docker_container_id = ?",
+                (docker_container_id,),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error deleting sandbox by container id: {e}")
+            return False
+
 
 # Create global instance
 db = Database()
